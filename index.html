@@ -219,7 +219,7 @@ select{width:100%;background:var(--bg);border:1px solid var(--border);border-rad
       Si una key alcanza el límite diario, el sistema pasa automáticamente a la siguiente.
     </div>
     <div>
-      <div class="field-label" style="margin-bottom:8px">API KEYS (mínimo 1, máximo 8)</div>
+      <div class="field-label" style="margin-bottom:8px">API KEYS (mínimo 1, máximo 20)</div>
       <div class="keys-list" id="keysList"></div>
       <button class="btn btn-secondary btn-sm" style="margin-top:8px;width:auto" onclick="addKeyRow()">+ Añadir key</button>
     </div>
@@ -480,7 +480,7 @@ window.closeKeysOverlay = () => {
 
 function addKeyRowWith(val) {
   const list = $('keysList');
-  if (list.children.length >= 8) return;
+  if (list.children.length >= 20) return;
   const row = document.createElement('div');
   row.className = 'key-row';
   const isValid = val.startsWith('gsk_') && val.length > 10;
