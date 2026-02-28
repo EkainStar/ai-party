@@ -365,12 +365,60 @@ const escHtml = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ══════════════════════════════════════════
-// AUTH
+// CRYPTO — AES-GCM encryption using PIN-derived key
 // ══════════════════════════════════════════
 async function hashPin(pin) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pin + 'aidialogue_salt'));
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
+
+// Derive a 256-bit AES key from the PIN using PBKDF2
+async function deriveAesKey(pin, saltHex) {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(pin), { name: 'PBKDF2' }, false, ['deriveKey']
+  );
+  const salt = hexToBytes(saltHex);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+function bytesToHex(buf) {
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function hexToBytes(hex) {
+  const arr = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) arr[i/2] = parseInt(hex.slice(i,i+2),16);
+  return arr;
+}
+
+// Encrypt array of strings → returns { iv, salt, data } as hex strings
+async function encryptKeys(pin, keys) {
+  const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const aesKey = await deriveAesKey(pin, salt);
+  const plaintext = new TextEncoder().encode(JSON.stringify(keys));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, plaintext);
+  return { iv: bytesToHex(iv), salt, data: bytesToHex(ciphertext) };
+}
+
+// Decrypt { iv, salt, data } → returns array of strings
+async function decryptKeys(pin, encrypted) {
+  const aesKey = await deriveAesKey(pin, encrypted.salt);
+  const iv = hexToBytes(encrypted.iv);
+  const ciphertext = hexToBytes(encrypted.data);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ciphertext);
+  return JSON.parse(new TextDecoder().decode(plaintext));
+}
+
+// ══════════════════════════════════════════
+// AUTH
+// ══════════════════════════════════════════
 
 window.switchToRegister = () => {
   $('overlayLogin').classList.add('hidden');
@@ -436,7 +484,21 @@ window.logout = () => {
 // ══════════════════════════════════════════
 async function loadUserData() {
   const snap = await getDoc(doc(db, 'users', currentUser.uid));
-  groqKeys = snap.data()?.groqKeys || [];
+  const data = snap.data() || {};
+  // Support both legacy plain-text keys and new encrypted format
+  if (data.encryptedKeys) {
+    try {
+      groqKeys = await decryptKeys(currentUser.pin, data.encryptedKeys);
+    } catch(e) {
+      console.error('Error decrypting keys:', e);
+      groqKeys = [];
+    }
+  } else if (data.groqKeys?.length) {
+    // Legacy: migrate plain keys to encrypted on next save
+    groqKeys = data.groqKeys;
+  } else {
+    groqKeys = [];
+  }
   currentKeyIdx = 0;
   updateKeysUI();
   await loadConversations();
@@ -512,9 +574,14 @@ window.handleSaveKeys = async () => {
   const inputs = [...$('keysList').querySelectorAll('input')];
   const keys = inputs.map(i => i.value.trim()).filter(k => k.startsWith('gsk_') && k.length > 10);
   if (keys.length === 0) { $('keysError').textContent = 'Introduce al menos una API key válida (empieza por gsk_).'; return; }
-  $('keysError').textContent = 'Guardando…';
+  $('keysError').textContent = 'Cifrando y guardando…';
   try {
-    await updateDoc(doc(db, 'users', currentUser.uid), { groqKeys: keys });
+    // Encrypt keys with PIN before storing — Firestore only ever sees ciphertext
+    const encrypted = await encryptKeys(currentUser.pin, keys);
+    await updateDoc(doc(db, 'users', currentUser.uid), {
+      encryptedKeys: encrypted,
+      groqKeys: []   // clear legacy plain-text field
+    });
     groqKeys = keys;
     currentKeyIdx = 0;
     updateKeysUI();
