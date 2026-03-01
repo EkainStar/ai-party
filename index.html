@@ -211,24 +211,17 @@ select{width:100%;background:var(--bg);border:1px solid var(--border);border-rad
   <div class="card">
     <div>
       <div class="logo" style="margin-bottom:6px"><div class="logo-icon">⚡</div> AI Party</div>
-      <div class="card-title">Mis API Keys</div>
+      <div class="card-title">Mis API Keys de Groq</div>
     </div>
     <div class="config-notice">
-      <b>Groq</b> (texto) — keys gratuitas en <code>console.groq.com</code><br>
-      <b>ElevenLabs</b> (voz) — key gratuita en <code>elevenlabs.io</code> → Profile → API Key<br>
-      Sin key de ElevenLabs la app funciona igual pero sin audio.
+      Cada usuario gestiona sus propias keys.<br>
+      Obtén keys gratuitas en <code>console.groq.com</code> → API Keys → Create API Key.<br>
+      Si una key alcanza el límite diario, el sistema pasa automáticamente a la siguiente.
     </div>
     <div>
-      <div class="field-label" style="margin-bottom:8px">GROQ API KEYS (mínimo 1, máximo 20)</div>
+      <div class="field-label" style="margin-bottom:8px">API KEYS (mínimo 1, máximo 20)</div>
       <div class="keys-list" id="keysList"></div>
-      <button class="btn btn-secondary btn-sm" style="margin-top:8px;width:auto" onclick="addKeyRow()">+ Añadir key Groq</button>
-    </div>
-    <div style="margin-top:14px">
-      <div class="field-label" style="margin-bottom:6px">ELEVENLABS API KEY (opcional)</div>
-      <div class="key-row">
-        <input type="text" id="elevenLabsKeyInput" placeholder="sk_..." />
-        <span id="elevenLabsKeyStatus" class="key-status"></span>
-      </div>
+      <button class="btn btn-secondary btn-sm" style="margin-top:8px;width:auto" onclick="addKeyRow()">+ Añadir key</button>
     </div>
     <div class="card-error" id="keysError"></div>
     <div class="btn-row">
@@ -364,11 +357,8 @@ let currentConv  = null;
 let histA = [], histB = [];
 let turnCount    = 0;
 let isGenerating = false;
-let groqKeys      = [];
-let currentKeyIdx  = 0;
-let elevenLabsKey  = '';
-let voiceIdA       = '';
-let voiceIdB       = '';
+let groqKeys     = [];
+let currentKeyIdx = 0;
 
 const $ = id => document.getElementById(id);
 const escHtml = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
@@ -498,17 +488,16 @@ async function loadUserData() {
   // Support both legacy plain-text keys and new encrypted format
   if (data.encryptedKeys) {
     try {
-      const decrypted = await decryptKeys(currentUser.pin, data.encryptedKeys);
-      groqKeys = decrypted.groqKeys || decrypted; // support old format (array) and new (object)
-      elevenLabsKey = decrypted.elevenLabsKey || '';
+      groqKeys = await decryptKeys(currentUser.pin, data.encryptedKeys);
     } catch(e) {
       console.error('Error decrypting keys:', e);
-      groqKeys = []; elevenLabsKey = '';
+      groqKeys = [];
     }
   } else if (data.groqKeys?.length) {
-    groqKeys = data.groqKeys; elevenLabsKey = '';
+    // Legacy: migrate plain keys to encrypted on next save
+    groqKeys = data.groqKeys;
   } else {
-    groqKeys = []; elevenLabsKey = '';
+    groqKeys = [];
   }
   currentKeyIdx = 0;
   updateKeysUI();
@@ -532,30 +521,17 @@ function updateKeysUI() {
 window.openKeysOverlay = () => openKeysOverlayInternal(false);
 
 function openKeysOverlayInternal(firstTime) {
+  // Populate list with current keys (masked)
   const list = $('keysList');
   list.innerHTML = '';
   if (groqKeys.length === 0) {
-    addKeyRowWith(''); addKeyRowWith('');
+    addKeyRowWith('');
+    addKeyRowWith('');
   } else {
     groqKeys.forEach(k => addKeyRowWith(k));
   }
-  // Populate ElevenLabs field
-  const elInput = $('elevenLabsKeyInput');
-  if (elInput) {
-    elInput.value = elevenLabsKey || '';
-    const st = $('elevenLabsKeyStatus');
-    if (st) {
-      if (elevenLabsKey) { st.textContent='✓'; st.className='key-status ok'; }
-      else { st.textContent=''; st.className='key-status'; }
-    }
-    elInput.addEventListener('input', () => {
-      const v = elInput.value.trim();
-      const st = $('elevenLabsKeyStatus');
-      if (v.length > 10) { st.textContent='✓'; st.className='key-status ok'; }
-      else { st.textContent=''; st.className='key-status'; }
-    });
-  }
   $('keysError').textContent = '';
+  // Hide cancel button if first time (must add at least one key)
   $('btnCloseKeys').style.display = firstTime ? 'none' : 'flex';
   $('overlayKeys').classList.remove('hidden');
 }
@@ -600,16 +576,13 @@ window.handleSaveKeys = async () => {
   if (keys.length === 0) { $('keysError').textContent = 'Introduce al menos una API key válida (empieza por gsk_).'; return; }
   $('keysError').textContent = 'Cifrando y guardando…';
   try {
-    const elKey = ($('elevenLabsKeyInput')?.value || '').trim();
-    // Encrypt both Groq keys and ElevenLabs key together
-    const payload = { groqKeys: keys, elevenLabsKey: elKey };
-    const encrypted = await encryptKeys(currentUser.pin, payload);
+    // Encrypt keys with PIN before storing — Firestore only ever sees ciphertext
+    const encrypted = await encryptKeys(currentUser.pin, keys);
     await updateDoc(doc(db, 'users', currentUser.uid), {
       encryptedKeys: encrypted,
       groqKeys: []   // clear legacy plain-text field
     });
     groqKeys = keys;
-    elevenLabsKey = elKey;
     currentKeyIdx = 0;
     updateKeysUI();
     $('overlayKeys').classList.add('hidden');
@@ -816,69 +789,6 @@ function unlockConversationFields() {
   if (btnRandom) btnRandom.disabled = false;
 }
 
-
-// ══════════════════════════════════════════
-// ELEVENLABS TTS
-// ══════════════════════════════════════════
-// Public ElevenLabs voices — male & female pools
-const EL_VOICES_MALE = [
-  { id: 'TxGEqnHWrfWFTfGW9XjX', name: 'Josh' },
-  { id: 'VR6AewLTigWG4xSOukaG', name: 'Arnold' },
-  { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam' },
-  { id: 'yoZ06aMxZJJ28mfd3POQ', name: 'Sam' },
-  { id: 'ODq5zmih8GrVes37Dizd', name: 'Patrick' },
-  { id: 'N2lVS1w4EtoT3dr4eOWO', name: 'Callum' },
-  { id: 'CYw3kZ02Hs0563khs1Fj', name: 'Dave' },
-  { id: 'ZQe5CZNOzWyzPSCn5a3c', name: 'James' }
-];
-const EL_VOICES_FEMALE = [
-  { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Bella' },
-  { id: 'MF3mGyEYCl7XYWbV9V6O', name: 'Elli' },
-  { id: 'jBpfuIE2acCmo8WwSIEv', name: 'Nicole' },
-  { id: 'oWAxZDx7w5VEj9dCyTzz', name: 'Grace' },
-  { id: 'ThT5KcBeYPX3keUQqHPh', name: 'Dorothy' },
-  { id: 'AZnzlk1XvdvUeBnXmlld', name: 'Domi' },
-  { id: 'z9fAnlkpzviPz146aGWa', name: 'Glinda' },
-  { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily' }
-];
-
-function pickRandomVoice(pool) {
-  return pool[Math.floor(Math.random() * pool.length)].id;
-}
-
-let currentAudio = null;
-
-async function speakText(text, voiceId) {
-  if (!elevenLabsKey || !voiceId) return;
-  // Stop any currently playing audio
-  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
-
-  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'xi-api-key': elevenLabsKey
-    },
-    body: JSON.stringify({
-      text,
-      model_id: 'eleven_multilingual_v2',
-      voice_settings: { stability: 0.5, similarity_boost: 0.75 }
-    })
-  });
-  if (!res.ok) {
-    console.warn('ElevenLabs TTS error:', res.status);
-    return;
-  }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  return new Promise(resolve => {
-    currentAudio = new Audio(url);
-    currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; resolve(); };
-    currentAudio.onerror = () => { currentAudio = null; resolve(); };
-    currentAudio.play().catch(() => resolve());
-  });
-}
-
 window.generateRandom = async () => {
   if (!groqKeys.length) { openKeysOverlayInternal(false); return; }
   const btn = $('btnRandom');
@@ -903,8 +813,6 @@ Devuelve SOLO un objeto JSON válido, sin texto extra, sin markdown, sin bloques
   "nameB": "nombre propio corto y evocador",
   "roleB": "2-3 frases en segunda persona que empiecen por Eres. Define voz, obsesiones, forma de ver el mundo",
   "scenario": "2-3 frases describiendo la situación concreta, el lugar, y la tensión o pregunta central del encuentro",
-  "genderA": "male o female según el personaje A",
-  "genderB": "male o female según el personaje B",
   "firstMessage": "primer mensaje de nameA, natural, en su voz característica, que abre la conversación de forma memorable"
 }`;
 
@@ -933,11 +841,6 @@ Devuelve SOLO un objeto JSON válido, sin texto extra, sin markdown, sin bloques
     if (parsed.roleB)       { $('roleB').value = parsed.roleB; }
     if (parsed.scenario)    { $('scenario').value = parsed.scenario; }
     if (parsed.firstMessage){ $('firstMessage').value = parsed.firstMessage; }
-    // Assign random voices based on gender
-    const poolA = parsed.genderA === 'female' ? EL_VOICES_FEMALE : EL_VOICES_MALE;
-    const poolB = parsed.genderB === 'female' ? EL_VOICES_FEMALE : EL_VOICES_MALE;
-    voiceIdA = pickRandomVoice(poolA);
-    voiceIdB = pickRandomVoice(poolB);
     updateTitles();
 
     // Visual feedback
@@ -981,10 +884,6 @@ window.startConversation = async () => {
     }
     setProgress(turnCount);
     $('chatMeta').textContent=`${turnCount} turnos`;
-    if (elevenLabsKey && voiceIdA) {
-      setStatus('HABLANDO', 'running');
-      await speakText($('firstMessage').value.trim() || msg, voiceIdA);
-    }
     setStatus('ESPERANDO');
     $('btnNext').style.display='flex';
     lockConversationFields();
@@ -1022,12 +921,6 @@ window.nextMessage = async () => {
     turnCount++; setProgress(turnCount);
     $('chatMeta').textContent=`${turnCount} turnos`;
     await saveConversation({side,name,text:reply,time:t});
-    // Speak the message — btnNext stays disabled until audio finishes
-    if (elevenLabsKey) {
-      const voiceId = side === 'a' ? voiceIdA : voiceIdB;
-      setStatus('HABLANDO', 'running');
-      await speakText(reply, voiceId);
-    }
     setStatus('ESPERANDO');
   } catch(err) {
     removeTyping(); addSysMsg(`⚠ ${err.message}`); setStatus('ERROR');
